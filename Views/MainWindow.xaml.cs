@@ -1,11 +1,18 @@
-﻿using System;
-using System.Collections.ObjectModel;
+﻿using System.Collections.ObjectModel;
+using System.ComponentModel;
 using System.Diagnostics;
-using System.Threading.Tasks;
+using System.IO;
+using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Data;
+using System.Windows.Input;
+using System.Windows.Media.Animation;
 using System.Windows.Media.Imaging;
-
+using System.Windows.Shell;
+using Launcher.Models;
+using Launcher.Services;
+using MaterialDesignThemes.Wpf;
 
 namespace Launcher.Views
 {
@@ -13,18 +20,38 @@ namespace Launcher.Views
     {
         public ObservableCollection<Game> Games { get; set; }
         private readonly GameScanner _scanner;
+        private ICollectionView? _gamesView;
+        private bool isGridView = false;
+
+        [DllImport("kernel32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool SetProcessWorkingSetSize(IntPtr process, IntPtr minimumWorkingSetSize, IntPtr maximumWorkingSetSize);
 
         public MainWindow()
         {
             InitializeComponent();
+            DataContext = this;
             Games = new ObservableCollection<Game>();
             _scanner = new GameScanner();
-            GameListBox.ItemsSource = Games;
+
+            _gamesView = CollectionViewSource.GetDefaultView(Games);
+            _gamesView.Filter = FilterGames;
+            GameListBox.ItemsSource = _gamesView;
+
+            WindowChrome.SetWindowChrome(this, new WindowChrome
+            {
+                CornerRadius = new CornerRadius(25),
+                GlassFrameThickness = new Thickness(0)
+            });
         }
 
         private async void MainWindow_OnLoaded(object sender, RoutedEventArgs e)
         {
             await RefreshGamesAsync();
+            if (FilterComboBox.Items.Count > 0)
+            {
+                FilterComboBox.SelectedIndex = 0;
+            }
         }
 
         private async void RefreshGamesButton_Click(object sender, RoutedEventArgs e)
@@ -35,70 +62,212 @@ namespace Launcher.Views
         private async Task RefreshGamesAsync()
         {
             RefreshGamesButton.IsEnabled = false;
+            ToggleViewButton.IsEnabled = false;
+            SearchTextBox.IsEnabled = false;
+            FilterComboBox.IsEnabled = false;
+            SearchTextBox.Text = string.Empty;
 
             Games.Clear();
             DetailsPanel.Visibility = Visibility.Hidden;
             PlaceholderPanel.Visibility = Visibility.Visible;
 
-            var foundGames = await Task.Run(() => _scanner.ScanAll());
+            // Сбрасываем фон
+            ChangeBackgroundImage(null);
 
+            var foundGames = await Task.Run(() => _scanner.ScanAllAsync());
             foreach (var game in foundGames)
             {
                 Games.Add(game);
             }
 
+            UpdateGameCount();
+
             RefreshGamesButton.IsEnabled = true;
+            ToggleViewButton.IsEnabled = true;
+            SearchTextBox.IsEnabled = true;
+            FilterComboBox.IsEnabled = true;
+        }
+
+        private bool FilterGames(object item)
+        {
+            if (item is not Game game) return false;
+
+            bool platformMatch = true;
+            if (FilterComboBox.SelectedItem is ComboBoxItem selectedPlatformItem)
+            {
+                string filterPlatform = selectedPlatformItem.Content.ToString();
+                if (filterPlatform != "Все платформы")
+                {
+                    platformMatch = game.Source != null &&
+                                    string.Equals(game.Source, filterPlatform, StringComparison.OrdinalIgnoreCase);
+                }
+            }
+
+            bool searchMatch = string.IsNullOrEmpty(SearchTextBox.Text) ||
+                               (game.Name != null && game.Name.Contains(SearchTextBox.Text, StringComparison.OrdinalIgnoreCase));
+
+            return platformMatch && searchMatch;
+        }
+
+        private void UpdateGameCount()
+        {
+            int count = _gamesView?.Cast<object>().Count() ?? 0;
+            string text = count.ToString();
+            int lastDigit = count % 10;
+            int lastTwoDigits = count % 100;
+            if (lastTwoDigits >= 11 && lastTwoDigits <= 19) { GameCountTextBlock.Text = text + " игр"; }
+            else if (lastDigit == 1) { GameCountTextBlock.Text = text + " игра"; }
+            else if (lastDigit >= 2 && lastDigit <= 4) { GameCountTextBlock.Text = text + " игры"; }
+            else { GameCountTextBlock.Text = text + " игр"; }
+        }
+
+        private void SearchTextBox_TextChanged(object sender, TextChangedEventArgs e)
+        {
+            _gamesView?.Refresh();
+            UpdateGameCount();
+        }
+
+        private void FilterComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            _gamesView?.Refresh();
+            UpdateGameCount();
+        }
+
+        private void ToggleViewButton_Click(object? sender, RoutedEventArgs? e)
+        {
+            isGridView = !isGridView;
+            var viewIcon = (PackIcon)ToggleViewButton.Content;
+
+            if (isGridView)
+            {
+                GameListBox.ItemsPanel = (ItemsPanelTemplate)FindResource("GridViewPanelTemplate");
+                GameListBox.ItemTemplate = (DataTemplate)FindResource("GridViewItemTemplate");
+                ScrollViewer.SetHorizontalScrollBarVisibility(GameListBox, ScrollBarVisibility.Disabled);
+                viewIcon.Kind = PackIconKind.ViewList;
+            }
+            else
+            {
+                GameListBox.ItemsPanel = (ItemsPanelTemplate)FindResource("ListViewPanelTemplate");
+                GameListBox.ItemTemplate = (DataTemplate)FindResource("ListViewItemTemplate");
+                viewIcon.Kind = PackIconKind.ViewGrid;
+            }
         }
 
         private void GameListBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
         {
-            if (GameListBox.SelectedItem is Game selectedGame)
+            if (GameListBox.SelectedItem is not Game selectedGame) return;
+
+            DetailsPanel.BeginAnimation(UIElement.OpacityProperty, null);
+            if (DetailsPanel.Opacity > 0) { DetailsPanel.Opacity = 0; }
+
+            GameTitleTextBlock.Text = selectedGame.Name;
+
+            bool isValidSteamId = !string.IsNullOrEmpty(selectedGame.AppId) && selectedGame.AppId.All(char.IsDigit);
+            SteamIdPanel.Visibility = selectedGame.Source == "Steam" && isValidSteamId ? Visibility.Visible : Visibility.Collapsed;
+            if (isValidSteamId) AppIdTextBlock.Text = selectedGame.AppId;
+
+            InstallPathTextBlock.Text = selectedGame.InstallPath ?? "Не найден";
+            SourceTextBlock.Text = selectedGame.Source ?? "Неизвестно";
+            LastPlayedTextBlock.Text = "Еще не отслеживается";
+
+            // --- Логика смены фона на постер ---
+            BitmapImage? posterBitmap = null;
+            if (!string.IsNullOrEmpty(selectedGame.PosterUrl))
+            {
+                try { posterBitmap = new BitmapImage(new Uri(selectedGame.PosterUrl)); }
+                catch { /* ignore */ }
+            }
+            ChangeBackgroundImage(posterBitmap);
+            // --- Конец логики ---
+
+            // Отображаем постер в деталях игры
+            BitmapImage? detailsPosterBitmap = null;
+            if (!string.IsNullOrEmpty(selectedGame.PosterUrl))
+            {
+                try { detailsPosterBitmap = new BitmapImage(new Uri(selectedGame.PosterUrl)); } catch { /* ignore */ }
+            }
+            GamePosterImage.Source = detailsPosterBitmap;
+
+            if (PlaceholderPanel.Visibility == Visibility.Visible)
             {
                 PlaceholderPanel.Visibility = Visibility.Hidden;
                 DetailsPanel.Visibility = Visibility.Visible;
-
-                GameTitleTextBlock.Text = selectedGame.Name;
-                AppIdTextBlock.Text = selectedGame.AppId ?? "Не найдено";
-                InstallPathTextBlock.Text = selectedGame.InstallPath ?? "Не найдено";
-
-                if (!string.IsNullOrEmpty(selectedGame.PosterUrl))
-                {
-                    try
-                    {
-                        var bitmap = new BitmapImage();
-                        bitmap.BeginInit();
-                        bitmap.UriSource = new Uri(selectedGame.PosterUrl);
-                        bitmap.CacheOption = BitmapCacheOption.OnLoad;
-                        bitmap.EndInit();
-                        GamePosterImage.Source = bitmap;
-                    }
-                    catch
-                    {
-                        GamePosterImage.Source = null;
-                    }
-                }
-                else
-                {
-                    GamePosterImage.Source = null;
-                }
             }
+
+            var fadeIn = new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(600));
+            DetailsPanel.BeginAnimation(UIElement.OpacityProperty, fadeIn);
         }
 
-        private void PlayButton_Click(object sender, RoutedEventArgs e)
+        private void ChangeBackgroundImage(BitmapImage? newBackground)
         {
-            if (GameListBox.SelectedItem is not Game selectedGame || string.IsNullOrEmpty(selectedGame.AppId))
+            if (newBackground == null || BackgroundImage_FadeIn == null || BackgroundImage == null)
             {
+                BackgroundImage.Source = null; // Просто очищаем фон
                 return;
             }
-            try
+
+            BackgroundImage_FadeIn.Source = newBackground;
+            BackgroundImage_FadeIn.Opacity = 0;
+
+            var fadeInAnimation = new DoubleAnimation(0, 1, TimeSpan.FromSeconds(0.5), FillBehavior.Stop);
+
+            fadeInAnimation.Completed += (s, e) =>
+            {
+                BackgroundImage.Source = newBackground;
+                BackgroundImage_FadeIn.Opacity = 0;
+                BackgroundImage_FadeIn.Source = null;
+            };
+
+            BackgroundImage_FadeIn.BeginAnimation(UIElement.OpacityProperty, fadeInAnimation);
+        }
+
+        private async void PlayButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (GameListBox.SelectedItem is not Game selectedGame) return;
+
+            if (selectedGame.Source == "Steam" && !string.IsNullOrEmpty(selectedGame.AppId))
             {
                 Process.Start(new ProcessStartInfo($"steam://run/{selectedGame.AppId}") { UseShellExecute = true });
                 this.WindowState = WindowState.Minimized;
+                // Не ждем завершения Steam игр, т.к. процесс может быть другим
+                return;
             }
-            catch (Exception ex)
+
+            var startInfo = new ProcessStartInfo(selectedGame.ExecutablePath)
             {
-                MessageBox.Show($"Не удалось запустить игру. Ошибка: {ex.Message}", "Ошибка запуска", MessageBoxButton.OK, MessageBoxImage.Error);
+                WorkingDirectory = Path.GetDirectoryName(selectedGame.ExecutablePath) ?? string.Empty,
+                UseShellExecute = true
+            };
+
+            Process? gameProcess = Process.Start(startInfo);
+
+            if (gameProcess == null) return;
+
+            var currentProcess = Process.GetCurrentProcess();
+            var originalPriority = currentProcess.PriorityClass;
+            try
+            {
+                this.Hide();
+                currentProcess.PriorityClass = ProcessPriorityClass.BelowNormal;
+                GC.Collect();
+                GC.WaitForPendingFinalizers();
+                SetProcessWorkingSetSize(currentProcess.Handle, (IntPtr)(-1), (IntPtr)(-1));
+
+                await gameProcess.WaitForExitAsync();
+            }
+            finally
+            {
+                currentProcess.PriorityClass = originalPriority;
+                this.Show();
+                this.WindowState = WindowState.Normal;
+                this.Activate();
             }
         }
+
+        private void TitleBar_MouseDown(object sender, MouseButtonEventArgs e) { if (e.ChangedButton == MouseButton.Left) this.DragMove(); }
+        private void Minimize_Click(object sender, RoutedEventArgs e) { this.WindowState = WindowState.Minimized; }
+        private void Close_Click(object sender, RoutedEventArgs e) { this.Close(); }
+        private void Profile_Click(object sender, RoutedEventArgs e){ ProfileWindow profileWindow = new ProfileWindow(); profileWindow.Show(); }
+
     }
 }
