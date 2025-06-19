@@ -8,7 +8,7 @@
         xmlns:wv2="clr-namespace:Microsoft.Web.WebView2.Wpf;assembly=Microsoft.Web.WebView2.Wpf"
         TextElement.Foreground="{DynamicResource MaterialDesignBody}"
         FontFamily="{DynamicResource MaterialDesignFont}"
-        Title="Gaming Launcher" Height="800" Width="1280" WindowStartupLocation="CenterScreen"
+        Title="Gaming Launcher" Height="800" Width="1500" WindowStartupLocation="CenterScreen"
         WindowStyle="None" AllowsTransparency="True" Background="Transparent"
         Loaded="MainWindow_OnLoaded" ResizeMode="NoResize">
 
@@ -292,11 +292,12 @@
 
                         <ComboBox Grid.Row="1" x:Name="FilterComboBox" Margin="16,0,16,10"
                                   materialDesign:HintAssist.Hint="Фильтр по платформе"
-                                  Style="{StaticResource MaterialDesignOutlinedComboBox}"
                                   SelectionChanged="FilterComboBox_SelectionChanged" Foreground="White">
                             <ComboBoxItem Content="Все платформы"/>
                             <ComboBoxItem Content="Steam"/>
                             <ComboBoxItem Content="Epic Games"/>
+                            <ComboBoxItem Content="Xbox Game Pass"/>
+                            <ComboBoxItem Content="Battle.net"/>
                         </ComboBox>
 
                         <TextBox Grid.Row="2" FontSize="15" x:Name="SearchTextBox" Margin="16,0,16,10"
