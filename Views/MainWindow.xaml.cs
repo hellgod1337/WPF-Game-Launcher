@@ -20,8 +20,11 @@ namespace Launcher.Views
     {
         public ObservableCollection<Game> Games { get; set; }
         private readonly GameScanner _scanner;
+        private readonly ImageCacheService _imageCacheService;
         private ICollectionView? _gamesView;
+        private readonly PlaytimeTrackerService _playtimeTracker;
         private bool isGridView = false;
+
 
         [DllImport("kernel32.dll")]
         [return: MarshalAs(UnmanagedType.Bool)]
@@ -33,6 +36,8 @@ namespace Launcher.Views
             DataContext = this;
             Games = new ObservableCollection<Game>();
             _scanner = new GameScanner();
+            _imageCacheService = new ImageCacheService();
+            _playtimeTracker = new PlaytimeTrackerService();
 
             _gamesView = CollectionViewSource.GetDefaultView(Games);
             _gamesView.Filter = FilterGames;
@@ -77,6 +82,11 @@ namespace Launcher.Views
             var foundGames = await Task.Run(() => _scanner.ScanAllAsync());
             foreach (var game in foundGames)
             {
+                // Присваиваем значение из нашего нового сервиса
+                if (game.Name != null)
+                {
+                    game.LastPlayed = _playtimeTracker.GetLastPlaytime(game.Name);
+                }
                 Games.Add(game);
             }
 
@@ -153,49 +163,120 @@ namespace Launcher.Views
             }
         }
 
-        private void GameListBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        // 1. ВСТАВЬТЕ ОБНОВЛЕННУЮ ВЕРСИЮ ЭТОГО МЕТОДА
+
+        private async void GameListBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
         {
             if (GameListBox.SelectedItem is not Game selectedGame) return;
 
+            // --- Обновление текстовой информации ---
             DetailsPanel.BeginAnimation(UIElement.OpacityProperty, null);
             if (DetailsPanel.Opacity > 0) { DetailsPanel.Opacity = 0; }
 
             GameTitleTextBlock.Text = selectedGame.Name;
+            InstallPathTextBlock.Text = selectedGame.InstallPath ?? "Не найден";
+            SourceTextBlock.Text = selectedGame.Source ?? "Неизвестно";
+
+            // Используем новый метод для форматирования даты
+            LastPlayedTextBlock.Text = FormatLastPlayed(selectedGame.LastPlayed);
 
             bool isValidSteamId = !string.IsNullOrEmpty(selectedGame.AppId) && selectedGame.AppId.All(char.IsDigit);
             SteamIdPanel.Visibility = selectedGame.Source == "Steam" && isValidSteamId ? Visibility.Visible : Visibility.Collapsed;
             if (isValidSteamId) AppIdTextBlock.Text = selectedGame.AppId;
 
-            InstallPathTextBlock.Text = selectedGame.InstallPath ?? "Не найден";
-            SourceTextBlock.Text = selectedGame.Source ?? "Неизвестно";
-            LastPlayedTextBlock.Text = "Еще не отслеживается";
 
-            // --- Логика смены фона на постер ---
-            BitmapImage? posterBitmap = null;
-            if (!string.IsNullOrEmpty(selectedGame.PosterUrl))
+            // --- Асинхронная логика загрузки изображений из кэша ---
+
+            selectedGame.LocalHeroPath = await _imageCacheService.GetLocalImagePathAsync(selectedGame.HeroUrl, selectedGame.Name, "hero");
+            selectedGame.LocalPosterPath = await _imageCacheService.GetLocalImagePathAsync(selectedGame.PosterUrl, selectedGame.Name, "poster");
+
+            if (!string.IsNullOrEmpty(selectedGame.LocalPosterPath))
             {
-                try { posterBitmap = new BitmapImage(new Uri(selectedGame.PosterUrl)); }
-                catch { /* ignore */ }
+                GamePosterImage.Source = CreateBitmapFromFile(selectedGame.LocalPosterPath);
             }
-            ChangeBackgroundImage(posterBitmap);
-            // --- Конец логики ---
-
-            // Отображаем постер в деталях игры
-            BitmapImage? detailsPosterBitmap = null;
-            if (!string.IsNullOrEmpty(selectedGame.PosterUrl))
+            else
             {
-                try { detailsPosterBitmap = new BitmapImage(new Uri(selectedGame.PosterUrl)); } catch { /* ignore */ }
+                GamePosterImage.Source = null;
             }
-            GamePosterImage.Source = detailsPosterBitmap;
 
+            string backgroundPath = selectedGame.LocalHeroPath ?? selectedGame.LocalPosterPath;
+            if (!string.IsNullOrEmpty(backgroundPath))
+            {
+                BackgroundImage.Source = CreateBitmapFromFile(backgroundPath);
+            }
+            else
+            {
+                BackgroundImage.Source = null;
+            }
+
+            // --- Отображение панели ---
             if (PlaceholderPanel.Visibility == Visibility.Visible)
             {
                 PlaceholderPanel.Visibility = Visibility.Hidden;
                 DetailsPanel.Visibility = Visibility.Visible;
             }
-
             var fadeIn = new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(600));
             DetailsPanel.BeginAnimation(UIElement.OpacityProperty, fadeIn);
+        }
+
+
+        // 2. ВСТАВЬТЕ ЭТОТ НОВЫЙ ВСПОМОГАТЕЛЬНЫЙ МЕТОД (можно в самый конец файла, перед последней '}')
+
+        private string FormatLastPlayed(DateTime? lastPlayedDate)
+        {
+            if (lastPlayedDate == null)
+            {
+                return "Еще не отслеживается";
+            }
+
+            DateTime date = lastPlayedDate.Value;
+            DateTime today = DateTime.Today;
+            DateTime yesterday = today.AddDays(-1);
+
+            if (date.Date == today)
+            {
+                return $"Сегодня в {date:HH:mm}";
+            }
+            if (date.Date == yesterday)
+            {
+                return $"Вчера в {date:HH:mm}";
+            }
+
+            // Для дат в пределах текущей недели
+            if ((today - date.Date).TotalDays < 7)
+            {
+                // Выводим день недели (например, "Во вторник в 14:20")
+                var culture = new System.Globalization.CultureInfo("ru-RU");
+                string dayOfWeek = culture.TextInfo.ToTitleCase(culture.DateTimeFormat.GetDayName(date.DayOfWeek));
+                return $"{dayOfWeek} в {date:HH:mm}";
+            }
+
+            return date.ToString("dd.MM.yyyy в HH:mm");
+        }
+
+        // Вставьте этот новый вспомогательный метод под методом GameListBox_SelectionChanged
+        private BitmapImage? CreateBitmapFromFile(string localPath)
+        {
+            if (string.IsNullOrEmpty(localPath) || !File.Exists(localPath))
+            {
+                return null;
+            }
+
+            try
+            {
+                var bitmap = new BitmapImage();
+                bitmap.BeginInit();
+                bitmap.UriSource = new Uri(localPath);
+                bitmap.CacheOption = BitmapCacheOption.OnLoad; // Важно для освобождения файла
+                bitmap.EndInit();
+                bitmap.Freeze(); // Важно для производительности в UI
+                return bitmap;
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"Ошибка создания BitmapImage из {localPath}: {ex.Message}");
+                return null;
+            }
         }
 
         private void ChangeBackgroundImage(BitmapImage? newBackground)
@@ -224,6 +305,8 @@ namespace Launcher.Views
         private async void PlayButton_Click(object sender, RoutedEventArgs e)
         {
             if (GameListBox.SelectedItem is not Game selectedGame) return;
+
+
 
             if (selectedGame.Source == "Steam" && !string.IsNullOrEmpty(selectedGame.AppId))
             {

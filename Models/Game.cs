@@ -7,8 +7,20 @@
         public string? ExecutablePath { get; set; }
         public string? Source { get; set; } // Например, "Steam", "Epic Games"
         public string? AppId { get; set; } // Steam App ID
-        public string? PosterUrl { get; set; } // URL постера для фона
-        public string? CoverArtPath { get; set; } // Локальный путь к обложке для GridView
+
+        // URL-адреса, получаемые от сканера
+        public string? PosterUrl { get; set; }
+        public string? HeroUrl { get; set; }
+
+        // НОВЫЕ СВОЙСТВА: Локальные пути к кэшированным файлам
+        public string? LocalPosterPath { get; set; }
+        public string? LocalHeroPath { get; set; }
+
+        // Это свойство можно оставить для совместимости или для локального пути
+        public string? CoverArtPath { get; set; }
+
+        // НОВОЕ СВОЙСТВО
+        public DateTime? LastPlayed { get; set; }
 
     }
 }

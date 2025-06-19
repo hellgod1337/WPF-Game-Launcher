@@ -1,7 +1,11 @@
 ﻿using Microsoft.Win32;
+using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Net.Http;
+using System.Net.Http.Headers;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using Launcher.Models;
 
@@ -9,20 +13,30 @@ namespace Launcher.Services
 {
     public class GameScanner
     {
-        private readonly string _rawgApiKey = "9a0b37f8df08460aa625a3eef04a4baa"; // Ваш ключ API
+        // ВАЖНО: Вставьте сюда свой API-ключ с сайта https://www.steamgriddb.com/
+        private readonly string _steamGridDbApiKey = "920bd5a27cb545077f596145e5c784c8";
         private readonly HttpClient _httpClient;
         private readonly string _cacheFilePath;
-        private Dictionary<string, string> _posterCache = new();
+        private Dictionary<string, CachedImageData> _imageCache = new();
+
+        // Внутренний класс для кэширования двух URL
+        private class CachedImageData
+        {
+            public string? PosterUrl { get; set; }
+            public string? HeroUrl { get; set; }
+        }
 
         public GameScanner()
         {
             _httpClient = new HttpClient();
             _httpClient.DefaultRequestHeaders.Add("User-Agent", "WPF-Game-Launcher");
+            // Добавляем заголовок авторизации для SteamGridDB
+            _httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", _steamGridDbApiKey);
 
             string appDataPath = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
             string appFolderPath = Path.Combine(appDataPath, "WPFGameLauncher");
             Directory.CreateDirectory(appFolderPath);
-            _cacheFilePath = Path.Combine(appFolderPath, "poster_cache.json");
+            _cacheFilePath = Path.Combine(appFolderPath, "image_cache_v2.json"); // Используем новое имя файла для нового кэша
 
             LoadCache();
         }
@@ -34,13 +48,13 @@ namespace Launcher.Services
                 if (File.Exists(_cacheFilePath))
                 {
                     string json = File.ReadAllText(_cacheFilePath);
-                    _posterCache = JsonSerializer.Deserialize<Dictionary<string, string>>(json)
-                                   ?? new Dictionary<string, string>();
+                    _imageCache = JsonSerializer.Deserialize<Dictionary<string, CachedImageData>>(json)
+                                  ?? new Dictionary<string, CachedImageData>();
                 }
             }
             catch
             {
-                _posterCache = new Dictionary<string, string>();
+                _imageCache = new Dictionary<string, CachedImageData>();
             }
         }
 
@@ -48,7 +62,7 @@ namespace Launcher.Services
         {
             try
             {
-                string json = JsonSerializer.Serialize(_posterCache, new JsonSerializerOptions { WriteIndented = true });
+                string json = JsonSerializer.Serialize(_imageCache, new JsonSerializerOptions { WriteIndented = true });
                 File.WriteAllText(_cacheFilePath, json);
             }
             catch { /* Игнорируем ошибки сохранения кэша */ }
@@ -66,106 +80,130 @@ namespace Launcher.Services
             ScanGaijinGames(uniqueGames);
             ScanBattleNetByFolders(uniqueGames);
 
-            // Асинхронная загрузка метаданных (включая изображения) для всех найденных игр
             var tasks = uniqueGames.Values.Select(FetchGameMetadataAsync).ToList();
             await Task.WhenAll(tasks);
 
-            SaveCache(); // Сохраняем кэш после всех операций
+            SaveCache();
             return uniqueGames.Values.OrderBy(g => g.Name).ToList();
         }
 
         private async Task FetchGameMetadataAsync(Game game)
         {
-            // Создаем уникальный ключ для кэша, чтобы избежать коллизий
+            // Используем очищенное имя для более надежного ключа кэша
             string cacheKey = !string.IsNullOrEmpty(game.AppId) && game.Source == "Steam"
                 ? $"steam_{game.AppId}"
-                : $"rawg_{game.Name}";
+                : $"game_{SanitizeName(game.Name ?? "")}";
 
-            // Проверяем, есть ли изображение в кэше
-            if (_posterCache.TryGetValue(cacheKey, out var cachedUrl) && !string.IsNullOrEmpty(cachedUrl))
+            if (_imageCache.TryGetValue(cacheKey, out var cachedData))
             {
-                game.PosterUrl = cachedUrl;
-                game.CoverArtPath = cachedUrl;
+                game.PosterUrl = cachedData.PosterUrl;
+                game.HeroUrl = cachedData.HeroUrl;
+                game.CoverArtPath = cachedData.PosterUrl; // Для совместимости
                 return;
             }
 
-            string? imageUrl = null;
+            string? posterUrl = null;
 
-            // Для игр Steam используем их официальные CDN для получения изображений
+            // Для игр Steam сначала пробуем быстрый официальный CDN для постера
             if (game.Source == "Steam" && !string.IsNullOrEmpty(game.AppId))
             {
-                // Предпочтительный URL - вертикальный постер
-                string steamPosterUrl = $"https://cdn.akamai.steamstatic.com/steam/apps/{game.AppId}/library_600x900.jpg";
-
-                try
-                {
-                    // Проверяем доступность постера через HEAD-запрос, чтобы не качать всё изображение
-                    using var request = new HttpRequestMessage(HttpMethod.Head, steamPosterUrl);
-                    using var response = await _httpClient.SendAsync(request);
-
-                    if (response.IsSuccessStatusCode)
-                    {
-                        imageUrl = steamPosterUrl;
-                    }
-                    else
-                    {
-                        // Если постер недоступен, пробуем получить заголовок (горизонтальное изображение)
-                        imageUrl = $"https://cdn.akamai.steamstatic.com/steam/apps/{game.AppId}/header.jpg";
-                    }
-                }
-                catch
-                {
-                    // В случае сетевой ошибки, ищем через API как запасной вариант
-                    imageUrl = await GetPosterFromApi(game.Name);
-                }
-            }
-            else
-            {
-                // Для всех остальных игр (Epic, Ubisoft и т.д.) ищем через RAWG API
-                imageUrl = await GetPosterFromApi(game.Name);
+                posterUrl = await GetSteamCdnImageAsync(game.AppId);
             }
 
-            // Если URL получен, присваиваем его свойствам игры и сохраняем в кэш
-            if (!string.IsNullOrEmpty(imageUrl))
+            // Теперь обращаемся к SteamGridDB для получения фона (hero) и постера (grid),
+            // если он не был найден через CDN Steam.
+            var (gridUrl, heroUrl) = await GetImagesFromSteamGridDbAsync(game.Name ?? "");
+
+            // Если постер из Steam CDN не нашелся, используем тот, что из SteamGridDB
+            if (string.IsNullOrEmpty(posterUrl))
             {
-                game.PosterUrl = imageUrl;
-                game.CoverArtPath = imageUrl;
-                _posterCache[cacheKey] = imageUrl;
+                posterUrl = gridUrl;
+            }
+
+            // Присваиваем URL свойствам игры и сохраняем в кэш
+            if (!string.IsNullOrEmpty(posterUrl) || !string.IsNullOrEmpty(heroUrl))
+            {
+                game.PosterUrl = posterUrl;
+                game.HeroUrl = heroUrl;
+                game.CoverArtPath = posterUrl; // Для совместимости
+
+                _imageCache[cacheKey] = new CachedImageData { PosterUrl = posterUrl, HeroUrl = heroUrl };
             }
         }
 
-
-        private async Task<string?> GetPosterFromApi(string gameName)
+        private async Task<string?> GetSteamCdnImageAsync(string appId)
         {
+            // Пытаемся получить вертикальный постер 600x900
+            string steamPosterUrl = $"https://cdn.akamai.steamstatic.com/steam/apps/{appId}/library_600x900.jpg";
             try
             {
-                // Очистка названия игры от лишних символов для более точного поиска
-                string cleanedName = Regex.Replace(
-                        gameName,
-                        @"™|®|©|:.*Edition|:.*of the Year.*",
-                        "",
-                        RegexOptions.IgnoreCase)
-                    .Trim();
-
-                string searchUrl = $"https://api.rawg.io/api/games?key={_rawgApiKey}&search={Uri.EscapeDataString(cleanedName)}&page_size=1";
-                HttpResponseMessage response = await _httpClient.GetAsync(searchUrl);
+                using var request = new HttpRequestMessage(HttpMethod.Head, steamPosterUrl);
+                using var response = await _httpClient.SendAsync(request);
 
                 if (response.IsSuccessStatusCode)
                 {
-                    string jsonResponse = await response.Content.ReadAsStringAsync();
-                    using var doc = JsonDocument.Parse(jsonResponse);
-                    if (doc.RootElement.TryGetProperty("results", out var results) && results.GetArrayLength() > 0)
-                    {
-                        var firstResult = results[0];
-                        if (firstResult.TryGetProperty("background_image", out var imageUrlElement))
-                        {
-                            return imageUrlElement.GetString();
-                        }
-                    }
+                    return steamPosterUrl;
                 }
+
+                // Если его нет, пробуем получить горизонтальный заголовок
+                string headerUrl = $"https://cdn.akamai.steamstatic.com/steam/apps/{appId}/header.jpg";
+                using var headerRequest = new HttpRequestMessage(HttpMethod.Head, headerUrl);
+                using var headerResponse = await _httpClient.SendAsync(headerRequest);
+                return headerResponse.IsSuccessStatusCode ? headerUrl : null;
             }
-            catch { /* Игнорируем ошибки API */ }
-            return null;
+            catch { return null; }
+        }
+
+        private async Task<(string? posterUrl, string? heroUrl)> GetImagesFromSteamGridDbAsync(string gameName)
+        {
+            if (string.IsNullOrEmpty(gameName)) return (null, null);
+
+            try
+            {
+                // 1. Ищем ID игры на SteamGridDB
+                string searchUrl = $"https://www.steamgriddb.com/api/v2/search/autocomplete/{Uri.EscapeDataString(SanitizeName(gameName))}";
+                HttpResponseMessage searchResponse = await _httpClient.GetAsync(searchUrl);
+                if (!searchResponse.IsSuccessStatusCode) return (null, null);
+
+                var searchJson = JsonNode.Parse(await searchResponse.Content.ReadAsStringAsync());
+                if (!(searchJson?["data"]?.AsArray().Any() ?? false)) return (null, null);
+
+                int gameId = searchJson["data"][0]["id"].GetValue<int>();
+
+                // 2. Параллельно запрашиваем постер (grid) и фон (hero)
+                var gridTask = GetImageUrlFromApiAsync($"https://www.steamgriddb.com/api/v2/grids/game/{gameId}?dimensions=600x900");
+                var heroTask = GetImageUrlFromApiAsync($"https://www.steamgriddb.com/api/v2/heroes/game/{gameId}?dimensions=1920x620");
+
+                await Task.WhenAll(gridTask, heroTask);
+
+                return (gridTask.Result, heroTask.Result);
+            }
+            catch { return (null, null); }
+        }
+
+        private async Task<string?> GetImageUrlFromApiAsync(string url)
+        {
+            try
+            {
+                var response = await _httpClient.GetAsync(url);
+                if (!response.IsSuccessStatusCode) return null;
+
+                var json = JsonNode.Parse(await response.Content.ReadAsStringAsync());
+                // Возвращаем URL первого изображения в массиве
+                return json?["data"]?[0]?["url"]?.GetValue<string>();
+            }
+            catch { return null; }
+        }
+
+        private string SanitizeName(string gameName)
+        {
+            // Очищаем имя от лишних слов для лучшего поиска
+            return Regex.Replace(
+                gameName,
+                @"™|®|©|:.*Edition|:.*of the Year.*| GOTY.*",
+                "",
+                RegexOptions.IgnoreCase)
+                .Trim();
         }
 
         private void ScanSteamGames(Dictionary<string, Game> foundGames)
@@ -219,7 +257,6 @@ namespace Launcher.Services
             }
             catch { }
         }
-
         private string? GetSteamInstallPath()
         {
             string[] paths =
@@ -234,7 +271,6 @@ namespace Launcher.Services
             }
             return null;
         }
-
         private void ScanGaijinGames(Dictionary<string, Game> foundGames)
         {
             try
@@ -429,7 +465,6 @@ namespace Launcher.Services
             }
             catch { }
         }
-
         private string GetGaijinGameName(string registryKeyName, string installPath)
         {
             // Определяем название игры по ключу реестра или пути
@@ -448,7 +483,6 @@ namespace Launcher.Services
             // Если не удалось определить, возвращаем имя ключа
             return registryKeyName;
         }
-
         private void ScanEpicGames(Dictionary<string, Game> foundGames)
         {
             try
@@ -480,7 +514,6 @@ namespace Launcher.Services
             }
             catch { }
         }
-
         private void ScanBattleNetByFolders(Dictionary<string, Game> foundGames)
         {
             try
@@ -614,7 +647,6 @@ namespace Launcher.Services
             }
             catch { }
         }
-
         private void ScanXboxGames(Dictionary<string, Game> foundGames)
         {
             try
