@@ -187,18 +187,18 @@
                     <ControlTemplate TargetType="ComboBox">
                         <Grid>
                             <ToggleButton Grid.Column="2"
-                                          IsChecked="{Binding IsDropDownOpen, RelativeSource={RelativeSource TemplatedParent}}"
-                                          Content="&#x25BC;"/>
+                                    IsChecked="{Binding IsDropDownOpen, RelativeSource={RelativeSource TemplatedParent}}"
+                                    Content="&#x25BC;"/>
                             <ContentPresenter Content="{TemplateBinding SelectionBoxItem}"
-                                              ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}"
-                                              ContentStringFormat="{TemplateBinding SelectionBoxItemStringFormat}"
-                                              HorizontalAlignment="Left"
-                                              Margin="3"/>
+                                            ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}"
+                                            ContentStringFormat="{TemplateBinding SelectionBoxItemStringFormat}"
+                                            HorizontalAlignment="Left"
+                                            Margin="3"/>
                             <Popup IsOpen="{Binding IsDropDownOpen, RelativeSource={RelativeSource TemplatedParent}}"
-                                   Placement="Bottom"
-                                   Focusable="False"
-                                   AllowsTransparency="True"
-                                   PopupAnimation="Slide">
+                               Placement="Bottom"
+                               Focusable="False"
+                               AllowsTransparency="True"
+                               PopupAnimation="Slide">
                                 <Border BorderBrush="Black" BorderThickness="1">
                                     <ScrollViewer>
                                         <ItemsPresenter/>
@@ -226,6 +226,83 @@
             <GradientStop Color="#15FFFFFF" Offset="0.5"/>
             <GradientStop Color="#08FFFFFF" Offset="1"/>
         </LinearGradientBrush>
+
+        <Style x:Key="PlayGlassButtonStyle" TargetType="Button">
+            <Setter Property="Width" Value="72"/>
+            <Setter Property="Height" Value="72"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Grid>
+                            <Border x:Name="GlassBackground"
+                                    CornerRadius="36"
+                                    BorderThickness="1"
+                                    BorderBrush="#40FFFFFF"
+                                    Background="{StaticResource GlassGradient}"
+                                    Opacity="0.9">
+                                <Border.Effect>
+                                    <BlurEffect Radius="2"/>
+                                </Border.Effect>
+                            </Border>
+                            <Border CornerRadius="36" Background="#15FFFFFF" BorderThickness="1" BorderBrush="#30FFFFFF">
+                                <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            </Border>
+                        </Grid>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="GlassBackground" Property="Background" Value="{StaticResource GlassGradientHover}"/>
+                                <Setter TargetName="GlassBackground" Property="BorderBrush" Value="#60FFFFFF"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="GlassBackground" Property="Background" Value="{StaticResource GlassGradientPressed}"/>
+                                <Setter TargetName="GlassBackground" Property="Opacity" Value="0.8"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="NavGlassButtonStyle" TargetType="Button">
+            <Setter Property="Width" Value="50"/>
+            <Setter Property="Height" Value="50"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Grid>
+                            <Border x:Name="GlassBackground"
+                                    CornerRadius="25"
+                                    BorderThickness="1"
+                                    BorderBrush="#40FFFFFF"
+                                    Background="{StaticResource GlassGradient}"
+                                    Opacity="0.9">
+                                <Border.Effect>
+                                    <BlurEffect Radius="2"/>
+                                </Border.Effect>
+                            </Border>
+                            <Border CornerRadius="25" Background="#15FFFFFF" BorderThickness="1" BorderBrush="#30FFFFFF">
+                                <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            </Border>
+                        </Grid>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="GlassBackground" Property="Background" Value="{StaticResource GlassGradientHover}"/>
+                                <Setter TargetName="GlassBackground" Property="BorderBrush" Value="#60FFFFFF"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="GlassBackground" Property="Background" Value="{StaticResource GlassGradientPressed}"/>
+                                <Setter TargetName="GlassBackground" Property="Opacity" Value="0.8"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
     </Window.Resources>
 
     <Border Background="#FF3A3A3A">
@@ -492,44 +569,7 @@
 
                                         <Button Grid.Column="1" x:Name="PlayButton" Click="PlayButton_Click"
                                                 ToolTip="Play Game" VerticalAlignment="Bottom"
-                                                Width="72" Height="72"
-                                                Cursor="Hand"
-                                                BorderThickness="0">
-                                            <Button.Style>
-                                                <Style TargetType="Button">
-                                                    <Setter Property="Template">
-                                                        <Setter.Value>
-                                                            <ControlTemplate TargetType="Button">
-                                                                <Grid>
-                                                                    <Border x:Name="GlassBackground"
-                                                                            CornerRadius="36"
-                                                                            BorderThickness="1"
-                                                                            BorderBrush="#40FFFFFF"
-                                                                            Background="{StaticResource GlassGradient}"
-                                                                            Opacity="0.9">
-                                                                        <Border.Effect>
-                                                                            <BlurEffect Radius="2"/>
-                                                                        </Border.Effect>
-                                                                    </Border>
-                                                                    <Border CornerRadius="36" Background="#15FFFFFF" BorderThickness="1" BorderBrush="#30FFFFFF">
-                                                                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                                                                    </Border>
-                                                                </Grid>
-                                                                <ControlTemplate.Triggers>
-                                                                    <Trigger Property="IsMouseOver" Value="True">
-                                                                        <Setter TargetName="GlassBackground" Property="Background" Value="{StaticResource GlassGradientHover}"/>
-                                                                        <Setter TargetName="GlassBackground" Property="BorderBrush" Value="#60FFFFFF"/>
-                                                                    </Trigger>
-                                                                    <Trigger Property="IsPressed" Value="True">
-                                                                        <Setter TargetName="GlassBackground" Property="Background" Value="{StaticResource GlassGradientPressed}"/>
-                                                                        <Setter TargetName="GlassBackground" Property="Opacity" Value="0.8"/>
-                                                                    </Trigger>
-                                                                </ControlTemplate.Triggers>
-                                                            </ControlTemplate>
-                                                        </Setter.Value>
-                                                    </Setter>
-                                                </Style>
-                                            </Button.Style>
+                                                Style="{StaticResource PlayGlassButtonStyle}">
                                             <Button.Effect>
                                                 <DropShadowEffect ShadowDepth="2" Color="#30000000" BlurRadius="20" Opacity="0.3"/>
                                             </Button.Effect>
@@ -552,6 +592,31 @@
                                        Foreground="#888888"/>
                         </StackPanel>
                     </materialDesign:Card>
+
+                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="0,20,20,10" Cursor="">
+                        <Button x:Name="PrevBackgroundButton" 
+                                    ToolTip="Предыдущий фон" 
+                                    Style="{StaticResource NavGlassButtonStyle}" 
+                                    Margin="0,0,37,0" 
+                                    Cursor="Hand"
+                                    Click="PrevBackgroundButton_Click">
+                            <Button.Effect>
+                                <DropShadowEffect ShadowDepth="1" Color="#30000000" BlurRadius="15" Opacity="0.3"/>
+                            </Button.Effect>
+                            <materialDesign:PackIcon Kind="ArrowLeft" Height="24" Width="24" Foreground="White"/>
+                        </Button>
+
+                        <Button x:Name="NextBackgroundButton" 
+                                ToolTip="Следующий фон" 
+                                Style="{StaticResource NavGlassButtonStyle}"
+                                Click="NextBackgroundButton_Click">
+                            <Button.Effect>
+                                <DropShadowEffect ShadowDepth="1" Color="#30000000" BlurRadius="15" Opacity="0.3"/>
+                            </Button.Effect>
+                            <materialDesign:PackIcon Kind="ArrowRight" Height="24" Width="24" Foreground="White"/>
+                        </Button>
+                    </StackPanel>
+
                 </Grid>
             </Grid>
 
@@ -569,6 +634,17 @@
                            Click="Close_Click" ToolTip="Close">
                         <materialDesign:PackIcon Kind="Close" Width="16" Height="16"/>
                     </Button>
+                </StackPanel>
+            </Grid>
+
+            <Grid x:Name="LoadingOverlay" Background="#AA000000" Visibility="Collapsed" Grid.ColumnSpan="2">
+                <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">
+                    <ProgressBar IsIndeterminate="False" x:Name="LoadingProgressBar"
+                     Width="300" Height="10" Style="{StaticResource MaterialDesignLinearProgressBar}"
+                     materialDesign:TransitionAssist.DisableTransitions="True"/>
+                    <TextBlock x:Name="LoadingStatusText" Text="Загрузка ресурсов..."
+                   Foreground="White" FontSize="16"
+                   HorizontalAlignment="Center" Margin="0,15,0,0"/>
                 </StackPanel>
             </Grid>
         </Grid>

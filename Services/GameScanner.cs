@@ -1,12 +1,17 @@
-﻿using Microsoft.Win32;
+﻿// Services/GameScanner.cs
+
+using Microsoft.Win32;
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
+using System.Threading.Tasks;
 using Launcher.Models;
 
 namespace Launcher.Services
@@ -19,24 +24,23 @@ namespace Launcher.Services
         private readonly string _cacheFilePath;
         private Dictionary<string, CachedImageData> _imageCache = new();
 
-        // Внутренний класс для кэширования двух URL
         private class CachedImageData
         {
             public string? PosterUrl { get; set; }
-            public string? HeroUrl { get; set; }
+            public List<string> HeroUrls { get; set; } = new List<string>();
         }
 
         public GameScanner()
         {
             _httpClient = new HttpClient();
             _httpClient.DefaultRequestHeaders.Add("User-Agent", "WPF-Game-Launcher");
-            // Добавляем заголовок авторизации для SteamGridDB
             _httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", _steamGridDbApiKey);
 
             string appDataPath = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
             string appFolderPath = Path.Combine(appDataPath, "WPFGameLauncher");
             Directory.CreateDirectory(appFolderPath);
-            _cacheFilePath = Path.Combine(appFolderPath, "image_cache_v2.json"); // Используем новое имя файла для нового кэша
+            // Используем новую версию кэша, чтобы данные обновились
+            _cacheFilePath = Path.Combine(appFolderPath, "image_cache_v3.json");
 
             LoadCache();
         }
@@ -48,12 +52,12 @@ namespace Launcher.Services
                 if (File.Exists(_cacheFilePath))
                 {
                     string json = File.ReadAllText(_cacheFilePath);
-                    _imageCache = JsonSerializer.Deserialize<Dictionary<string, CachedImageData>>(json)
-                                  ?? new Dictionary<string, CachedImageData>();
+                    _imageCache = JsonSerializer.Deserialize<Dictionary<string, CachedImageData>>(json) ?? new Dictionary<string, CachedImageData>();
                 }
             }
-            catch
+            catch (Exception ex)
             {
+                Debug.WriteLine($"Ошибка загрузки кэша: {ex.Message}");
                 _imageCache = new Dictionary<string, CachedImageData>();
             }
         }
@@ -65,172 +69,161 @@ namespace Launcher.Services
                 string json = JsonSerializer.Serialize(_imageCache, new JsonSerializerOptions { WriteIndented = true });
                 File.WriteAllText(_cacheFilePath, json);
             }
-            catch { /* Игнорируем ошибки сохранения кэша */ }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"Ошибка сохранения кэша: {ex.Message}");
+            }
         }
 
         public async Task<List<Game>> ScanAllAsync()
         {
             var uniqueGames = new Dictionary<string, Game>(StringComparer.OrdinalIgnoreCase);
 
-            // Сканирование игр из разных источников
+            // Здесь вызываются ваши методы сканирования
             ScanSteamGames(uniqueGames);
             ScanEpicGames(uniqueGames);
             ScanUbisoftGames(uniqueGames);
             ScanXboxGames(uniqueGames);
             ScanGaijinGames(uniqueGames);
             ScanBattleNetByFolders(uniqueGames);
+            // ... и другие, если есть ...
 
             var tasks = uniqueGames.Values.Select(FetchGameMetadataAsync).ToList();
             await Task.WhenAll(tasks);
 
             SaveCache();
-            return uniqueGames.Values.OrderBy(g => g.Name).ToList();
+            return uniqueGames.Values.Where(g => !string.IsNullOrEmpty(g.Name)).OrderBy(g => g.Name).ToList();
         }
 
         private async Task FetchGameMetadataAsync(Game game)
         {
-            // Используем очищенное имя для более надежного ключа кэша
+            if (string.IsNullOrEmpty(game.Name)) return;
+
             string cacheKey = !string.IsNullOrEmpty(game.AppId) && game.Source == "Steam"
                 ? $"steam_{game.AppId}"
-                : $"game_{SanitizeName(game.Name ?? "")}";
+                : $"game_{SanitizeName(game.Name)}";
 
-            if (_imageCache.TryGetValue(cacheKey, out var cachedData))
+            if (_imageCache.TryGetValue(cacheKey, out var cachedData) && cachedData?.PosterUrl != null)
             {
                 game.PosterUrl = cachedData.PosterUrl;
-                game.HeroUrl = cachedData.HeroUrl;
-                game.CoverArtPath = cachedData.PosterUrl; // Для совместимости
+                game.HeroUrls = cachedData.HeroUrls;
+                game.CoverArtPath = cachedData.PosterUrl;
                 return;
             }
 
-            string? posterUrl = null;
+            var (posterUrl, heroUrls) = await GetImagesFromSteamGridDbAsync(game.Name);
 
-            // Для игр Steam сначала пробуем быстрый официальный CDN для постера
-            if (game.Source == "Steam" && !string.IsNullOrEmpty(game.AppId))
+            game.PosterUrl = posterUrl;
+            game.HeroUrls = heroUrls;
+            game.CoverArtPath = posterUrl;
+
+            if (!string.IsNullOrEmpty(posterUrl) || heroUrls.Any())
             {
-                posterUrl = await GetSteamCdnImageAsync(game.AppId);
-            }
-
-            // Теперь обращаемся к SteamGridDB для получения фона (hero) и постера (grid),
-            // если он не был найден через CDN Steam.
-            var (gridUrl, heroUrl) = await GetImagesFromSteamGridDbAsync(game.Name ?? "");
-
-            // Если постер из Steam CDN не нашелся, используем тот, что из SteamGridDB
-            if (string.IsNullOrEmpty(posterUrl))
-            {
-                posterUrl = gridUrl;
-            }
-
-            // Присваиваем URL свойствам игры и сохраняем в кэш
-            if (!string.IsNullOrEmpty(posterUrl) || !string.IsNullOrEmpty(heroUrl))
-            {
-                game.PosterUrl = posterUrl;
-                game.HeroUrl = heroUrl;
-                game.CoverArtPath = posterUrl; // Для совместимости
-
-                _imageCache[cacheKey] = new CachedImageData { PosterUrl = posterUrl, HeroUrl = heroUrl };
+                _imageCache[cacheKey] = new CachedImageData { PosterUrl = posterUrl, HeroUrls = heroUrls };
             }
         }
 
-        private async Task<string?> GetSteamCdnImageAsync(string appId)
+        private async Task<(string? posterUrl, List<string> heroUrls)> GetImagesFromSteamGridDbAsync(string gameName)
         {
-            // Пытаемся получить вертикальный постер 600x900
-            string steamPosterUrl = $"https://cdn.akamai.steamstatic.com/steam/apps/{appId}/library_600x900.jpg";
-            try
-            {
-                using var request = new HttpRequestMessage(HttpMethod.Head, steamPosterUrl);
-                using var response = await _httpClient.SendAsync(request);
-
-                if (response.IsSuccessStatusCode)
-                {
-                    return steamPosterUrl;
-                }
-
-                // Если его нет, пробуем получить горизонтальный заголовок
-                string headerUrl = $"https://cdn.akamai.steamstatic.com/steam/apps/{appId}/header.jpg";
-                using var headerRequest = new HttpRequestMessage(HttpMethod.Head, headerUrl);
-                using var headerResponse = await _httpClient.SendAsync(headerRequest);
-                return headerResponse.IsSuccessStatusCode ? headerUrl : null;
-            }
-            catch { return null; }
-        }
-
-        private async Task<(string? posterUrl, string? heroUrl)> GetImagesFromSteamGridDbAsync(string gameName)
-        {
-            if (string.IsNullOrEmpty(gameName)) return (null, null);
+            if (string.IsNullOrEmpty(gameName)) return (null, new List<string>());
 
             try
             {
-                // 1. Ищем ID игры на SteamGridDB
                 string searchUrl = $"https://www.steamgriddb.com/api/v2/search/autocomplete/{Uri.EscapeDataString(SanitizeName(gameName))}";
                 HttpResponseMessage searchResponse = await _httpClient.GetAsync(searchUrl);
-                if (!searchResponse.IsSuccessStatusCode) return (null, null);
+                if (!searchResponse.IsSuccessStatusCode) return (null, new List<string>());
 
                 var searchJson = JsonNode.Parse(await searchResponse.Content.ReadAsStringAsync());
-                if (!(searchJson?["data"]?.AsArray().Any() ?? false)) return (null, null);
+                if (!(searchJson?["data"]?.AsArray().Any() ?? false)) return (null, new List<string>());
 
                 int gameId = searchJson["data"][0]["id"].GetValue<int>();
 
-                // 2. Параллельно запрашиваем постер (grid) и фон (hero)
-                var gridTask = GetImageUrlFromApiAsync($"https://www.steamgriddb.com/api/v2/grids/game/{gameId}?dimensions=600x900");
-                var heroTask = GetImageUrlFromApiAsync($"https://www.steamgriddb.com/api/v2/heroes/game/{gameId}?dimensions=1920x620");
+                var posterTask = GetImageUrlFromApiAsync($"https://www.steamgriddb.com/api/v2/grids/game/{gameId}?dimensions=600x900");
+                var heroesTask = GetImageUrlsFromApiAsync($"https://www.steamgriddb.com/api/v2/heroes/game/{gameId}?mimes=image/jpeg,image/png,image/webp&types=static&nsfw=false");
 
-                await Task.WhenAll(gridTask, heroTask);
+                await Task.WhenAll(posterTask, heroesTask);
 
-                return (gridTask.Result, heroTask.Result);
+                Debug.WriteLine($"Для игры '{gameName}' найдено фонов: {heroesTask.Result.Count}");
+
+                return (posterTask.Result, heroesTask.Result);
             }
-            catch { return (null, null); }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"Ошибка при запросе к SteamGridDB для '{gameName}': {ex.Message}");
+                return (null, new List<string>());
+            }
+        }
+
+        private async Task<List<string>> GetImageUrlsFromApiAsync(string url)
+        {
+            var urls = new List<string>();
+            try
+            {
+                var response = await _httpClient.GetAsync(url);
+                if (!response.IsSuccessStatusCode) return urls;
+
+                var json = JsonNode.Parse(await response.Content.ReadAsStringAsync());
+                if (json?["success"]?.GetValue<bool>() == true && json["data"] is JsonArray dataArray)
+                {
+                    foreach (var item in dataArray)
+                    {
+                        if (item?["url"]?.GetValue<string>() is string imageUrl && !string.IsNullOrEmpty(imageUrl))
+                        {
+                            urls.Add(imageUrl);
+                        }
+                    }
+                }
+                return urls.Take(5).ToList();
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"Ошибка API запроса на список URL ({url}): {ex.Message}");
+                return urls;
+            }
         }
 
         private async Task<string?> GetImageUrlFromApiAsync(string url)
         {
-            try
-            {
-                var response = await _httpClient.GetAsync(url);
-                if (!response.IsSuccessStatusCode) return null;
-
-                var json = JsonNode.Parse(await response.Content.ReadAsStringAsync());
-                // Возвращаем URL первого изображения в массиве
-                return json?["data"]?[0]?["url"]?.GetValue<string>();
-            }
-            catch { return null; }
+            var urls = await GetImageUrlsFromApiAsync(url);
+            return urls.FirstOrDefault();
         }
 
         private string SanitizeName(string gameName)
         {
-            // Очищаем имя от лишних слов для лучшего поиска
-            return Regex.Replace(
-                gameName,
-                @"™|®|©|:.*Edition|:.*of the Year.*| GOTY.*",
-                "",
-                RegexOptions.IgnoreCase)
-                .Trim();
+            return Regex.Replace(gameName, @"™|®|©|:.*Edition|:.*of the Year.*| GOTY.*", "", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant).Trim();
         }
 
+        // Вспомогательный метод, чтобы избежать дублирования кода
+        private void AddGameToDictionary(Dictionary<string, Game> gameDict, Game newGame)
+        {
+            if (!string.IsNullOrEmpty(newGame.Name) && !gameDict.ContainsKey(newGame.Name))
+            {
+                gameDict.Add(newGame.Name, newGame);
+            }
+        }
+
+        // --- Методы сканирования с добавленными проверками ---
         private void ScanSteamGames(Dictionary<string, Game> foundGames)
         {
             try
             {
                 string? steamInstallPath = GetSteamInstallPath();
                 if (string.IsNullOrEmpty(steamInstallPath)) return;
-
                 var libraryPaths = new List<string> { steamInstallPath };
-
                 string libraryFoldersVdfPath = Path.Combine(steamInstallPath, "steamapps", "libraryfolders.vdf");
                 if (File.Exists(libraryFoldersVdfPath))
                 {
                     string content = File.ReadAllText(libraryFoldersVdfPath);
                     foreach (Match m in Regex.Matches(content, @"\""path\""\s+\""(.*?)\"""))
                     {
-                        string path = m.Groups[1].Value.Replace(@"\\", @"\");
-                        if (Directory.Exists(path)) libraryPaths.Add(path);
+                        if (Directory.Exists(m.Groups[1].Value.Replace(@"\\", @"\")))
+                            libraryPaths.Add(m.Groups[1].Value.Replace(@"\\", @"\"));
                     }
                 }
-
                 foreach (string libraryPath in libraryPaths.Distinct())
                 {
                     string steamAppsPath = Path.Combine(libraryPath, "steamapps");
                     if (!Directory.Exists(steamAppsPath)) continue;
-
                     foreach (string acfFile in Directory.GetFiles(steamAppsPath, "appmanifest_*.acf"))
                     {
                         string acfContent = File.ReadAllText(acfFile);
@@ -239,38 +232,52 @@ namespace Launcher.Services
                         if (nameMatch.Success && appidMatch.Success)
                         {
                             string gameName = nameMatch.Groups[1].Value;
-                            if (gameName.Contains("Steamworks") || gameName.Contains("Redist"))
-                                continue;
-
-                            var game = new Game
-                            {
-                                Name = gameName,
-                                AppId = appidMatch.Groups[1].Value,
-                                InstallPath = Path.GetDirectoryName(acfFile),
-                                Source = "Steam"
-                            };
-                            if (!foundGames.ContainsKey(game.Name))
-                                foundGames.Add(game.Name, game);
+                            if (gameName.Contains("Steamworks") || gameName.Contains("Redist")) continue;
+                            var game = new Game { Name = gameName, AppId = appidMatch.Groups[1].Value, InstallPath = Path.GetDirectoryName(acfFile), Source = "Steam" };
+                            AddGameToDictionary(foundGames, game);
                         }
                     }
                 }
             }
-            catch { }
+            catch (Exception ex) { Debug.WriteLine($"Ошибка сканирования Steam: {ex.Message}"); }
         }
+
         private string? GetSteamInstallPath()
         {
-            string[] paths =
-            {
-                @"SOFTWARE\WOW6432Node\Valve\Steam",
-                @"SOFTWARE\Valve\Steam"
-            };
+            string[] paths = { @"SOFTWARE\WOW6432Node\Valve\Steam", @"SOFTWARE\Valve\Steam" };
             foreach (var path in paths)
             {
                 using RegistryKey? key = Registry.LocalMachine.OpenSubKey(path);
-                if (key != null) return key.GetValue("InstallPath") as string;
+                if (key?.GetValue("InstallPath") is string installPath) return installPath;
             }
             return null;
         }
+
+        private void ScanEpicGames(Dictionary<string, Game> foundGames)
+        {
+            try
+            {
+                string manifestsPath = @"C:\ProgramData\Epic\EpicGamesLauncher\Data\Manifests";
+                if (!Directory.Exists(manifestsPath)) return;
+                foreach (string filePath in Directory.GetFiles(manifestsPath, "*.item"))
+                {
+                    string content = File.ReadAllText(filePath);
+                    using var doc = JsonDocument.Parse(content);
+                    if (doc.RootElement.TryGetProperty("DisplayName", out var nameElement) && doc.RootElement.TryGetProperty("InstallLocation", out var pathElement))
+                    {
+                        string? gameName = nameElement.GetString();
+                        if (!string.IsNullOrEmpty(gameName) && !gameName.Equals("UEFN"))
+                        {
+                            var game = new Game { Name = gameName, InstallPath = pathElement.GetString(), Source = "Epic Games" };
+                            AddGameToDictionary(foundGames, game);
+                        }
+                    }
+                }
+            }
+            catch (Exception ex) { Debug.WriteLine($"Ошибка сканирования Epic Games: {ex.Message}"); }
+        }
+
+   
         private void ScanGaijinGames(Dictionary<string, Game> foundGames)
         {
             try
@@ -384,16 +391,16 @@ namespace Launcher.Services
 
                 // Поиск в стандартных путях установки
                 string[] gaijinPaths = {
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "War Thunder"),
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), "War Thunder"),
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Crossout"),
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), "Crossout"),
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Star Conflict"),
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), "Star Conflict"),
-            @"C:\Games\War Thunder",
-            @"D:\Games\War Thunder",
-            @"E:\Games\War Thunder"
-        };
+                    Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "War Thunder"),
+                    Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), "War Thunder"),
+                    Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Crossout"),
+                    Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), "Crossout"),
+                    Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Star Conflict"),
+                    Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), "Star Conflict"),
+                    @"C:\Games\War Thunder",
+                    @"D:\Games\War Thunder",
+                    @"E:\Games\War Thunder"
+                };
 
                 foreach (string path in gaijinPaths)
                 {
@@ -482,37 +489,6 @@ namespace Launcher.Services
 
             // Если не удалось определить, возвращаем имя ключа
             return registryKeyName;
-        }
-        private void ScanEpicGames(Dictionary<string, Game> foundGames)
-        {
-            try
-            {
-                string manifestsPath = @"C:\ProgramData\Epic\EpicGamesLauncher\Data\Manifests";
-                if (!Directory.Exists(manifestsPath)) return;
-
-                foreach (string filePath in Directory.GetFiles(manifestsPath, "*.item"))
-                {
-                    string content = File.ReadAllText(filePath);
-                    using var doc = JsonDocument.Parse(content);
-                    if (doc.RootElement.TryGetProperty("DisplayName", out var nameElement) &&
-                        doc.RootElement.TryGetProperty("InstallLocation", out var pathElement))
-                    {
-                        string? gameName = nameElement.GetString();
-                        if (!string.IsNullOrEmpty(gameName) && !gameName.Equals("UEFN"))
-                        {
-                            var game = new Game
-                            {
-                                Name = gameName,
-                                InstallPath = pathElement.GetString(),
-                                Source = "Epic Games"
-                            };
-                            if (!foundGames.ContainsKey(game.Name))
-                                foundGames.Add(game.Name, game);
-                        }
-                    }
-                }
-            }
-            catch { }
         }
         private void ScanBattleNetByFolders(Dictionary<string, Game> foundGames)
         {
@@ -653,9 +629,9 @@ namespace Launcher.Services
             {
                 // Список папок, которые нужно исключить (не являются играми)
                 string[] excludedFolders = {
-            "GameSave", "wgs", ".GamingRoot", "Temp", "Cache",
-            "Logs", "Settings", "Config", "Data"
-        };
+                    "GameSave", "wgs", ".GamingRoot", "Temp", "Cache",
+                    "Logs", "Settings", "Config", "Data"
+                };
 
                 // Поиск в C:\XboxGames
                 string xboxGamesPath = @"C:\XboxGames";
@@ -731,10 +707,10 @@ namespace Launcher.Services
 
                 // Дополнительный поиск в других возможных локациях Xbox
                 string[] additionalXboxPaths = {
-            @"D:\XboxGames",
-            @"E:\XboxGames",
-            @"C:\Games"
-        };
+                    @"D:\XboxGames",
+                    @"E:\XboxGames",
+                    @"C:\Games"
+                };
 
                 foreach (string path in additionalXboxPaths)
                 {
